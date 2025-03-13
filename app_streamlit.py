@@ -52,7 +52,7 @@ with st.sidebar:
     # Stripe API Key input (masked)
     stripe_api_key = st.text_input(
         "Stripe API Key", 
-        value="sk_test_51R1xVsRpAxJZ7g7M33WhvntAIjpX4tF2yoqYpRUgYRBWx7LYV64cqyfE0ErPxQpaoIEzNbUQdwSAy7vcQt0dqioB00jmkPBQ2k",
+        value="stripe_api_key",
         type="password"
     )
     
