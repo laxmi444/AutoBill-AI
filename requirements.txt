@@ -1,1 +1,8 @@
-
+pydantic 
+python-dotenv 
+urllib3 
+openai-agents 
+stripe_agent_toolkit 
+streamlit 
+pandas 
+nest_asyncio
