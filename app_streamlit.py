@@ -6,11 +6,12 @@ from pydantic import BaseModel, Field
 import pandas as pd
 import nest_asyncio
 from typing import List
+from mcp import MCP, MCPConfig  # Added MCP imports
 
-# Apply nest_asyncio to allow running asyncio in streamlit
+# apply nest_asyncio to allow running asyncio in streamlit
 nest_asyncio.apply()
 
-# Disable the urllib3 warning about SSL
+# disables security warnings that appear when making API requests
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from dotenv import load_dotenv
@@ -30,6 +31,8 @@ if 'processing' not in st.session_state:
     st.session_state.processing = False
 if 'step' not in st.session_state:
     st.session_state.step = 1
+if 'mcp_client' not in st.session_state:
+    st.session_state.mcp_client = None
 
 # Pydantic models
 class InvoiceOutput(BaseModel):
@@ -52,14 +55,14 @@ with st.sidebar:
     # Stripe API Key input (masked)
     stripe_api_key = st.text_input(
         "Stripe API Key", 
-        value="your_stripe_api_key",
+        value="stripe_api_key",
         type="password"
     )
     
     # Vector store ID input
     vector_store_id = st.text_input(
         "Vector Store ID", 
-        value="vs_67d202bbb540819198de06c08eb95586"
+        value="your_vector_store_id"
     )
     
     # Currency selection
@@ -69,6 +72,27 @@ with st.sidebar:
         index=0
     )
     
+    # MCP Configuration Section
+    st.subheader("MCP Configuration")
+    
+    mcp_model = st.selectbox(
+        "MCP Model",
+        options=["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"],
+        index=0
+    )
+    
+    mcp_api_key = st.text_input(
+        "OpenAI API Key for MCP",
+        type="password"
+    )
+    
+    max_tokens = st.slider(
+        "Max Output Tokens",
+        min_value=100,
+        max_value=4096,
+        value=1024
+    )
+    
     st.divider()
     
     # Run button
@@ -76,6 +100,20 @@ with st.sidebar:
         st.session_state.processing = True
         st.session_state.step = 1
         st.session_state.invoice_results = []
+        
+        # Initialize MCP client
+        if mcp_api_key:
+            try:
+                mcp_config = MCPConfig(
+                    api_key=mcp_api_key,
+                    model=mcp_model,
+                    max_tokens=max_tokens
+                )
+                st.session_state.mcp_client = MCP(config=mcp_config)
+                st.success("MCP client initialized successfully!")
+            except Exception as e:
+                st.error(f"Failed to initialize MCP client: {str(e)}")
+                st.session_state.processing = False
 
 # Initialize Stripe Agent Toolkit with configuration
 def init_stripe_toolkit(api_key, currency):
@@ -92,29 +130,35 @@ def init_stripe_toolkit(api_key, currency):
                 "prices": {
                     "create": True,
                     "default_params": {
-                        "currency": currency
+                        "currency": "usd"
                     }
                 },
                 "invoice_items": {
                     "create": True,
                     "default_params": {
-                        "currency": currency
+                        "currency": "usd"
                     }
                 },
                 "invoices": {
                     "create": True,
                     "update": True,
                     "default_params": {
-                        "currency": currency
+                        "currency": 'usd'
                     }
                 }
             }
         },
     )
 
-# Initialize agents
-def init_agents(stripe_api_key, vector_store_id, currency):
+##initialize agents with mcp integration
+
+def init_agents(stripe_api_key, vector_store_id, currency, mcp_client=None):
     stripe_agent_toolkit = init_stripe_toolkit(stripe_api_key, currency)
+    
+    #configure agent options
+    agent_options = {}
+    # if mcp_client:
+    #     agent_options["model_completion_provider"] = mcp_client
     
     file_search_agent = Agent(
         name="File Search Agent",
@@ -126,6 +170,7 @@ def init_agents(stripe_api_key, vector_store_id, currency):
             )
         ],
         output_type=InvoiceListOutput,
+        **agent_options
     )
 
     invoice_agent = Agent(
@@ -144,7 +189,13 @@ Follow this exact sequence when creating invoices:
 IMPORTANT: Always create the invoice BEFORE creating invoice items, and always use the actual invoice ID returned from the invoice creation step.
 """,
         tools=stripe_agent_toolkit.get_tools(),
+        **agent_options
     )
+    
+    # Store MCP client in agent objects for potential future use
+    if mcp_client:
+        file_search_agent.mcp_client = mcp_client
+        invoice_agent.mcp_client = mcp_client
     
     return file_search_agent, invoice_agent
 
@@ -181,13 +232,7 @@ async def process_invoice(invoice_agent, invoice):
         f"https://api.stripe.com/v1/invoices/[invoice_id]/send"
     ]
     
-    # Display URLs as a simple list
-    # with url_container.container():
-    #     st.write("**Stripe API Endpoints:**")
-    #     for url in stripe_urls:
-    #         st.write(f"- {url}")
-    
-    # Process the invoice
+   
     with st.spinner(f"Processing invoice for {invoice.name}..."):
         invoice_task = await Runner.run(
             invoice_agent,
@@ -206,7 +251,7 @@ async def process_invoice(invoice_agent, invoice):
         "urls": stripe_urls
     }
 
-# Function to run the invoice search and processing workflow
+# function to run the invoice search and processing workflow
 def run_invoice_workflow():
     if not st.session_state.processing:
         return
@@ -215,18 +260,19 @@ def run_invoice_workflow():
     if st.session_state.step == 1:
         st.subheader("Step 1: Searching for Unpaid Invoices")
         
-        # Initialize agents with current configurations
+        #initialize agents with current configurations and MCP client
         file_search_agent, invoice_agent = init_agents(
             stripe_api_key, 
             vector_store_id,
-            currency
+            currency,
+            st.session_state.mcp_client  # Pass MCP client to agents
         )
         
-        # Run the search asynchronously
+        # run the search asynchronously
         outstanding_invoices = asyncio.run(search_unpaid_invoices(file_search_agent))
         st.session_state.outstanding_invoices = outstanding_invoices
         
-        # Move to next step
+        # move to next step
         st.session_state.step = 2
         st.rerun()
     
@@ -260,11 +306,12 @@ def run_invoice_workflow():
     elif st.session_state.step == 3:
         st.subheader("Step 3: Processing Invoices")
         
-        # Initialize agents with current configurations
+        # Initialize agents with current configurations and MCP client
         file_search_agent, invoice_agent = init_agents(
             stripe_api_key, 
             vector_store_id,
-            currency
+            currency,
+            st.session_state.mcp_client  # Pass MCP client to agents
         )
         
         invoices = st.session_state.outstanding_invoices.invoices
@@ -311,7 +358,7 @@ def run_invoice_workflow():
                 st.write("**Invoice Generation Results:**")
                 if "result_list" in result:
                     for item in result["result_list"]:
-                        if item.strip():  # Only show non-empty lines
+                        if item.strip():  # item.strip() removes any extra spaces from the beginning or end of the text
                             st.write(f"- {item.strip()}")
                 else:
                     # Fallback if result_list is not available
@@ -331,6 +378,16 @@ def run_invoice_workflow():
             st.session_state.invoice_results = []
             st.rerun()
 
+# Add MCP status indicator in sidebar
+with st.sidebar:
+    st.divider()
+    if st.session_state.mcp_client:
+        st.success("🟢 MCP Client: Connected")
+        st.info(f"Using model: {mcp_model}")
+    else:
+        st.warning("🟠 MCP Client: Not connected")
+        st.info("Enter your OpenAI API key to use MCP")
+
 # Run the workflow if processing flag is set
 if st.session_state.processing:
     run_invoice_workflow()
@@ -341,7 +398,7 @@ else:
     then creates and sends Stripe invoices automatically.
     
     To begin:
-    1. Configure your Stripe API key and other settings in the sidebar
+    1. Configure your Stripe API key and MCP settings in the sidebar
     2. Click "Search & Process Unpaid Invoices" to start
     """)
     
@@ -356,18 +413,46 @@ else:
         
         st.dataframe(example_df, use_container_width=True)
 
-# Add additional information about workflow
-with st.sidebar:
-    st.markdown("### How It Works")
-    st.markdown("""
-    **Invoice Creation Workflow:**
-    1. Search documents for unpaid invoices
-    2. For each customer found:
-       - Create customer in Stripe
-       - Create product with service description
-       - Create price for the product
-       - Create invoice for customer
-       - Add invoice items to the invoice
-       - Finalize the invoice
-       - Send the invoice
-    """)
+
+
+
+st.markdown("### About MCP")
+st.markdown("""
+**Model Context Protocol (MCP):**
+- Provides standardized access to OpenAI models
+- Manages context efficiently
+- Improves agent performance by maintaining context across calls
+- Enables more coherent multi-step reasoning
+""")
+
+# MCP diagnostic section (for debugging)
+if st.checkbox("Show MCP Diagnostics", value=False):
+    st.subheader("MCP Diagnostics")
+    
+    if st.session_state.mcp_client:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Model", mcp_model)
+            st.metric("Max Output Tokens", max_tokens)
+        
+        with col2:
+            # These values would need to be implemented depending on how MCP reports usage
+            stats = st.session_state.mcp_client.get_stats()
+            st.metric("Active Context Length", stats["active_context_tokens"])
+            st.metric("API Calls Made", stats["call_count"])
+        
+        if st.button("Test MCP Connection"):
+            try:
+                # Simple test query to verify MCP is working
+                with st.spinner("Testing MCP connection..."):
+                    test_response = asyncio.run(
+                        st.session_state.mcp_client.complete(
+                            "Please respond with 'MCP connection successful' if you receive this message."
+                        )
+                    )
+                    st.success(f"Response received: {test_response}")
+            except Exception as e:
+                st.error(f"MCP test failed: {str(e)}")
+    else:
+        st.warning("MCP client not initialized. Please enter API key in sidebar.")
