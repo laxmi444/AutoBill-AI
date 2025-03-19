@@ -40,7 +40,19 @@ class MCP:
         
         Args:
             message: The system message to set
+
+        
         """
+        if message is None:
+            message = """You are AutoBill AI, an expert invoice management assistant specialized in:
+            1. Identifying unpaid invoices from financial documents
+            2. Extracting customer information (names, emails, services, amounts)
+            3. Creating and sending invoices through Stripe API
+            4. Managing invoice workflows (creation, finalization, sending)
+            5. Tracking payment statuses and following up on unpaid invoices
+            6. Providing clear summaries of invoice processing results
+            7. Supporting multiple currencies and payment options
+            """
         self.system_message = message
     
     async def complete(self, prompt: str) -> str:
